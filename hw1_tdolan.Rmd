@@ -2,23 +2,36 @@
 title: "Homework1"
 author: "Tara Dolan"
 date: "9/22/2023"
-output: html_document
+output:
+  html_document: default
+  pdf_document: default
 ---
 
 ```{r setup, include=FALSE}
-knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(echo = TRUE, message=FALSE, warning=FALSE)
 ```
 
 load required packages
-```{r, message=FALSE}
-packages <-c("data.table","tidyverse")
+```{r, message=FALSE, echo=TRUE, results='hide'}
+packages <-c("data.table","fishmethods","tidyverse")
 lapply(packages,require,character.only = TRUE)
 ```
 
 **1.Draw a graph of the population model variables, including relationships linking data, population variables, and parameters**
-
+$$
+1.\: data: \hat{N_t} \\
+2.\: process: N_{t+1}=(1+r)N_t + \varepsilon \\
+3.\: parameters: N_t, \sigma^2, r \\
+ \: \\
+Where,\\
+4. \:ln(\hat{N_t}) \sim Normdist(ln(N_t), \sigma^2)
+$$
+There should be arrows going from $\hat{N_t}$ in line 1 to  $N_t$ on line 4; between $r$ on line 2 and $r$ on line 3; between the observation error $\varepsilon$ on line 2 and the sample variance $\sigma^2$ on lines 3 and 4. 
 
 **2. Reparameterize the population dynamics model so that the numbers at time t are a function of the growth rate r and the population size in 1978**  
+$$
+N_t=N_{t=1978}(1+r)
+$$
 
 **3. Fit the population dynamics model to the available abundance data. You can assume that the observation error variance does not change over time and is an estimable parameter.**  
 ```{r}
@@ -29,42 +42,135 @@ BCBW <-data.table(Year=c(1978,1980,1981,1982,1983,1985,1986,1987,1988,1993,2001)
 
 #We are going to linearize the model, so create a log of Nt  
 BCBW <- mutate(BCBW,lnNumber=log(Number))
+#create a log for the offset
+BCBW <-mutate(BCBW, ln1978=log(BCBW$Number[BCBW$Year=="1978"]), n1978=BCBW$Number[BCBW$Year=="1978"])
+#make spaces in the data
+Year <-seq(1978,2001,1)%>%as.data.frame()
+colnames(Year)<-c("Year")
+BCBW <-full_join(BCBW,Year)%>%arrange(Year)
+BCBW$timestep <-as.numeric(seq(0,23,1))
 
-#model inputs  
-t <-BCBW$Year #time
-lnN1978 <-BCBW$lnNumber[BCBW$Year=="1978"] #log abundance at time 1978
-N1978 <-BCBW$Number[BCBW$Year=="1978"] #abundance at time 1978
-Nt <-BCBW$Number # unlogged observations
-lnNt <-BCBW$lnNumber # logged observations
+#1978 is a constant, so we want to fit data from 1979 onward
+BCBW_short <-filter(BCBW, timestep >0)
 
-#linear fit (unlogged)
-fit_lm1 <-lm(Nt~t)
-coef(fit_lm)
-intercept <-fit_lm$coefficients[[1]]
-growth_coeffcient <-fit_lm$coefficients[[2]]
+#glm fit
+glm_fit <-glm(log(Number)~0 + timestep + offset(ln1978),data=BCBW_short)
+paste("coefficients of the GLM fit:", coef(glm_fit))
 
-#linear fit - not sure where the intercept comes in here. 
-fit_lm <- lm(log(Nt) ~ t)
-coef(fit_lm)
-intercept <-exp(fit_lm$coefficients[[1]])
-growth_coeffcient <-fit_lm$coefficients[[2]]
-
-#nonlinear fit
-add_nls <- nls(Nt ~ N1978*exp(r*t), start = list(r = 0.04))
-coef(add_nls)
-#doesn't work... maybe starting growth rate is bad? 
-
+#linearized fit - not sure where the intercept comes in here. 
+fit_lm <- lm(BCBW_short$lnNumber ~ BCBW_short$timestep)
+paste("coefficients of the log linear fit:", coef(fit_lm))
+exp(fit_lm$coefficients[[1]]) #notice that this is the 1978 number
+fit_lm$coefficients[[2]]#notice that this is the same growth rate as the glm fit
 
 ```
+The coefficient of the glm fit `r round(coef(glm_fit),3)` is roughly the same as that of the lm fit `r round(fit_lm$coefficients[[2]],3)`. The intercept of the linear fit `r round(fit_lm$coefficients[[1]],3)` is the observation of abundance in 1978. 
+
 
 **4.Plot the resulting model predictions from the fitted model along with the data, and provide comment on the fit to the data (e.g. via residuals, etc.)**
 
 ```{r}
+#predict over new data on the scale of the response variable
+predglm <-predict(glm_fit,newdata=data.frame(timestep=seq(0,23,1),ln1978=rep(log(BCBW$Number[BCBW$Year=="1978"]))),se.fit=T, type="response")
 
-BCBW %>%
+#attach predicted values to the data frame with observed values
+preds <-as.data.frame(predglm)%>%rownames_to_column(var="timestep")%>%
+  mutate(timestep=as.numeric(timestep))
+#this dataframe will not have the NA values in it
+BCBW2 <-full_join(BCBW_short, preds)%>%na.omit()%>%
+  #back transform the logged predictor values to the scale of the observation data
+  mutate(pred=exp(fit))
+
+#plot
+BCBW2%>%
   ggplot(aes(Year,Number))+
-  geom_point()
-  
+  geom_point()+
+  geom_line(aes(Year, pred),col="red")+
+  ggtitle("Abundance of BCBW with GLM fit")+
+  theme_classic()
+ 
+##explore the residuals##
+ plot(density(resid(glm_fit, type='pearson')), main="Pearson residuals")
+ scatter.smooth(BCBW2$Year, rstandard(glm_fit, type='deviance'), col='gray',  main="Pearson residuals",xlab="Year",ylab="standardized deviance residuals")
+ scatter.smooth(predict(glm_fit, type='response'), rstandard(glm_fit, type='deviance'),col='gray',xlab="response",ylab="standardized deviance residuals")
 ```  
+  
+The data appear to be lognormally distributed. The residuals on the lognormally fit data are approximately normally distributed. The fit appears good but data points later in the time series likely have more leverage because there are fewer of them. 
+
+**5. Provide an estimate for the growth rate r**  
+The coefficient for the glm represents
+$$
+log(1+r)
+$$
+Backtransform to get the growth rate:  
+$$
+e^{(glm.coeff)}-1
+$$
+The growth rate for the equation should be:
+```{r} 
+exp(coef(glm_fit))-1
+```
+
+However, we should try to plug it back in and see if it is in the ballpark of our data & model. 
+```{r}
+r=exp(coef(glm_fit))-1
+BCBW2 <- mutate(BCBW2, plugin = (1+r)*Number)
+
+#plot
+BCBW2%>%
+  ggplot(aes(Year,Number))+
+  geom_point()+
+  geom_line(aes(Year, pred),col="red")+
+  geom_line(aes(Year, plugin),col="blue")+
+  ggtitle("Abundance of BCBW with GLM fit (red) and plug in values (blue)")+
+  theme_classic()
+
+```
+
+**6. Produce an estimate (with std err) for the population size in 2002.**  
+```{r} 
+newdata <-data.frame(timestep=24,ln1978=log(BCBW$Number[BCBW$Year=="1978"]))
+
+#predict over new data on the scale of the response variable
+predglm2 <-predict(glm_fit,newdata=newdata,se.fit=T, response=T)
+predglm2$fit
+#back transform
+exp(predglm2$fit)
+```
+The estimate for 2002 is `r exp(predglm2$fit)`.
+
+We need to backtransform the standard error of the fit. Can't exponentiate it. So one option is to use the bt.log function in fish methods package that Gary made. 
+```{r}
+#backtransform the standard error using nifty fishmethods bt.log - but not sure what to input for the sample size
+bt_se <-bt.log(meanlog=predglm2$fit, sdlog=predglm2$se.fit, n=10)
+bt_se
+```
+from this value we take sd.1, which gives 1718.79. This seems like a reasonable value for standard error. But I don't know how this is working, so I wanted to try a few other methods. 
+
+Another method to try is to try to get a standard error of the mean using a permutation approach.
+```{r}
+# random draw from a t distribution - but not sure how many degrees of freedom?
+bt_list <-c()
+for (i in 1:100){
+  bt_list[i] <- exp(predglm2$fit +rt(1,2)*predglm2$se.fit)
+}
+bt_se2 <-mean(bt_list)
+bt_se2
+```
+This is way too high. I probably made a mistake here.  
+
+A google search suggests it is possible to use the Delta method to approximate the back-transformed standard error.  (Source: https://vsni.co.uk/blogs/back-transform-standard-error) 
+```{r}
+bt_se3 <-(predglm2$se.fit/(abs(1/exp(predglm2$fit))))
+bt_se3
+```
+That also seems like a reasonable value. I am going to go with this value `r round(bt_se3,3)` for my answer. 
 
 
+**7. Comment on the assumptions of the model, and the implications of fitting this model to these data.**
+In a GLM model, the mean is transformed by the link function instead of transforming the response. It is important to choose the correct link function and to correctly specify the data distribution. We are assuming a linear relationship between the predictor variable and the transformed response variable. By log transforming the data, we assume this relationship is linear in the log scale. Linear models generally assume independence of observations and constant variance.
+
+**8. BONUS: Construct a likelihood profile for r to derive an approximate 95% confidence interval for r.**
+
+
+**9. BONUS: Compare results from 3-6 to those from a fitted model that uses the annual CVs for the abundance estimates rather than a time-invariant observation error variance.**
