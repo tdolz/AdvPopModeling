@@ -1,0 +1,226 @@
+---
+title: "Advanced Population Modeling Homework 4"
+author: "Tara Dolan"
+date: "11/27/2023"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r, warning=F, message=F}
+library(TMB)
+library(tidyverse)
+library(readxl)
+
+setwd("/Users/tdolan/Documents/R-Github/AdvPopModeling")
+```
+<br> <br> 
+
+**Load and format the data**
+<br>
+```{r}
+#catch data from 1935-2016
+catch <- read_xlsx("session-04_10-31/flounder_index_data.xlsx","catch") 
+catch1963 = filter(catch, Year > 1962) # for this first exercise, we're setting year 0 to 1963
+#survey index from 1963-2016
+index <- read_xlsx("session-04_10-31/flounder_index_data.xlsx","survey")
+#set year 0 = 1963 the beginning of the survey series, 
+index_years <- index$Year - min(catch1963$Year)
+
+## age comps ##
+age <- read_xlsx("hw4/floundah_agecomps.xlsx") 
+age_comp = sapply(age[,-1], '*', 100)%>%round(0)
+
+#add small constant then renormalize to = 1.
+#age_comp2=sapply(age[,-1], '+', 0.0001)%>%as.matrix()
+#age_comp3 <- as.data.frame(t(apply(age_comp2, 1, function(row) row / sum(row))))
+#age_comp3$RowSum <- rowSums(age_comp3)
+#age_comp = age_comp3[,1:5]%>%as.matrix()
+
+
+##biodata
+maturity <- c(0.1,0.5,0.9,1,1,1,1,1,1,1)
+selectivity <- c(0.1,0.75,0.9,1,1,1,1,1,1,1)
+WAA <-c(0.040,0.160,0.331,0.511,0.675,0.812,0.922,1.006,1.070,1.117)
+```
+
+**Data exploration with plots**  
+```{r}
+ggplot(aes(Year, Catch), data=catch1963)+
+  geom_line()+geom_point()+
+  ylab("mt")+
+  ggtitle("Floundah catch from 1963-2016")+
+  theme_classic()
+
+ggplot(aes(Year, Index),data=index)+
+  geom_line()+geom_point()+
+  ylab("kg/tow")+
+  ggtitle("Floundah survey abundance index from 1963-2016")+
+  theme_classic()
+```
+
+*1. (No modeling, 20 points) Using the plots of the age data above, write a list of 5 (or more) take-homes
+that you infer about the population dynamics, year class strengths, and important model structure
+assumptions and decisions. How do your conclusions differ from previous evaluations when only
+confronted with the abundance and catch time series?*  
+<br><br>  
+
+1. The survey captures older age classes more consistently than the fishery. Age class 5+ has zero catches in the fishery in some years, but not in the survey. <br>  
+2. The survey also consistently catches the youngest age class (age 1) in greater proportions compared to the fishery. Floundah may recruit to the survey gear at a smaller size than to the fishery. This effect is more pronounced in later years (from about 1995 on) suggesting that the fishery may have changed gear or fishing practices in such a way that it was less efficient for the youngest age classes starting in the mid-1990s. <br>  
+3. The survey data appears to be more variable in the later part of the time series (late 1990's-on). However, the survey units are kg per tow, compared to the metric tons of the catch time series. The much larger units of the catch time series could be masking the annual fluctuations, potentially noise, that are evident in the survey index. The survey data has an associated (constant) CV, whereas the fishery time series does not. <br>  
+4. The catch time series began in 1935 and exhibits a period of relatively high values that peaked in the 1950s, before the survey time series began. Catch and abundance values in recent years, mid-2000s onward, show similarly high abundance levels, indicating the stock has recovered to 1950's levels and sustained roughly similar catch rates for about two decades. The catch time series does not factor in effort, so increased effort could confound recent high catches. However, the survey series roughly mirrors the trends in the catch series and does have some measure of effort. <br> 
+5.  In the age structured production model (ASPM, previous exercise), we summed biomass at age, generated in the process model, to a total biomass index which was subsequently fit to biomass from the survey and catch series. In this exercise, the statistical catch at age model (SCAA), we can separately fit numbers at age generated in the process model to numbers at age observed in our catch and survey series because we have age composition for our observed data. The previously given vectors for weight at age and maturity reference at least 10 age classes, whereas age proportion data is only available for 5 age classes. The additional biomass from ages 5 and older are assumed to be contained in the plus group. We can only fit the proportions at age to age 5+, meaning the observation uncertainty associated with age classes 5 and up is not estimated. <br> 6. This problem set assumes identical age proportions between the survey and the catch time series. 
+<br> <br>
+
+2. (30 points) Fit a statistical catch at age model to the floundah data, with a start year of 1963. Assume annual recruitments as deviations from a Beverton-Holt stock-recruit relationship (fix steepness at h = 0.7), and treat these deviations as random effects. Assume that the population age structure is in equilibrium in the first year (1963), but that the population is not in an unfished state. Parameters to estimate include the time series of fishing mortality, unfished recruitment (R0), the initial year recruitment relative to the unfished recruitment ($\phi$), the annual recruitment deviations, the standard deviation of the annual recruitment deviations ($\sigma_R$, i.e. process error variance), selectivity parameters for both the survey and the fishery assuming a logistic function of age for both (details below), and the survey observation error standard deviation, $\sigma_I$ (if you do not use the analytical MLE). 
+Assume the previously given vectors for weight at age and maturity, and that $M = 0.4yr^{−1}$.  
+<br> <br>
+
+
+**First, attempt to fit the regular aspm from the aspm.cpp file provided.**  
+<br>
+```{r, echo=FALSE}
+#data
+data <- list(age_comp=age_comp,
+               catches = catch1963$Catch,
+               index = index$Index,
+                index_years=index_years,
+                selex=selectivity,
+               weight=WAA, 
+                k=0,
+               maturity=maturity)
+data
+
+#parameters
+parameters <- list(logR0= log(1000), #we tried 10, 0, 0.7, 1000000, try log(2.14e01), something large
+                   logfracR1= log(1), # tried -0.5, 0, 1, try log(2.18e01) 
+                   logith= 0,# tried 0.1,0,0.5, try (logit(0.7))
+                   logM= log(0.4), # tried -1.6,0, -7.0, try(log 0.4)
+                   logSigmaC= log(0.05), #tried 0.05, 0.2, 0, -10
+                   logSigmaI= log(0.2), #tried 0.2, -1.6, 0, -0.1
+                   logF= rep(-1.6,length(data$catches)))  #tried -1.6, -2, 0, -5.0 (try -4.1e01)
+
+parameters
+
+######### compile and load the model ######
+## Compile and load the model
+dll_name <- "aspmnew" # # changed 
+if(is.loaded(dll_name)) {
+  dyn.unload(dynlib(dll_name))
+}
+compile("aspmnew.cpp")
+dyn.load(dynlib(dll_name))
+
+
+## Make a function object
+obj <- MakeADFun(data, parameters, DLL= dll_name,
+                 map = list(
+                 logM=factor(NA),
+                 logith=factor(NA),
+                 logSigmaC=factor(NA)),
+                 control=list(eval.max=10000,iter.max=10000,rel.tol=1e-15))
+
+## Call function minimizer
+opt <- nlminb(obj$par, obj$fn, obj$gr, control= list(eval.max = 10000,
+                                                       iter.max = 10000))
+
+## Get parameter uncertainties and convergence diagnostics
+sdr <- sdreport(obj)
+sdr
+
+pl <- obj$env$parList(opt$par) 
+pl
+
+```
+<br> <br>
+
+**We need to get some good starting values for new parameters in the SCAA such as annual recruitment deviations and the selectivity parameters. Get some initial values from the ASPM.** 
+<br>
+```{r}
+q <- summary(sdr, type = "report") %>% 
+  as.data.frame() %>% 
+  janitor::clean_names() %>% 
+  rownames_to_column(var="type")
+
+rec <-q%>%slice(grep("R", type))
+rec[5:nrow(rec),] #the time series
+rec_est <-filter(q, type=="R")
+
+#in the ASPM, selectivity was given as:
+selectivity <- c(0.1,0.75,0.9,1,1,1,1,1,1,1)
+#A50 is the age at 50% selectivity - here between 1-2 years. Let's say 2
+#A95 is the difference in age between 50 and 95 selectivity. 
+# here 95% selectivity is a little older than 3 years. Let's say 3. 
+# Starting values A50=2, A95=1 but they are logistic. 
+
+
+```
+<br>
+Standard error of the mean of recruitment from the ASPM was 9.38, so let's try that as an initial value for annual recruitment deviations?  
+<br> <br>
+
+**Fit the SCAA model**  
+<br>
+```{r, echo=FALSE}
+#data
+data <- list(age_comp=age_comp,
+               catches = catch1963$Catch,
+               index = index$Index,
+               weight=WAA, 
+               maturity=maturity)
+data
+
+#parameters
+parameters <- list(logR0= log(1000), 
+                   logfracR1= log(1),  
+                   logSigmaI= log(0.2), 
+                   logF= rep(-1.6,length(data$catches)),
+                   #Mapped params
+                   logith=0.6,
+                   logM= log(0.4), 
+                   logSigmaC= log(0.05),
+                   #New params
+                   logEtaT=rep(0,length(data$catches)), #based on aspm R.
+                   logSigmaR=log(0.6), #from Gavin's email.  
+                   logA50s=log(7.389), #about 2 
+                   A95s=log(2.71828), # about 1
+                   A50f=log(7.389), #about 2 
+                   A95f=log(2.71828) # about 1
+                   )  
+
+parameters
+
+######### compile and load the model ######
+## Compile and load the model
+dll_name <- "tdolan_hw4" # # changed 
+if(is.loaded(dll_name)) {
+  dyn.unload(dynlib(dll_name))
+}
+compile("tdolan_hw4.cpp")
+dyn.load(dynlib(dll_name))
+
+
+## Make a function object
+obj2 <- MakeADFun(data, parameters, DLL= dll_name,
+                 map = list(
+                 logM=factor(NA),
+                 logith=factor(NA),
+                 logSigmaC=factor(NA)),
+                 control=list(eval.max=10000,iter.max=10000,rel.tol=1e-15))
+
+## Call function minimizer
+opt2 <- nlminb(obj2$par, obj2$fn, obj2$gr, control= list(eval.max = 10000,
+                                                       iter.max = 10000))
+
+## Get parameter uncertainties and convergence diagnostics
+sdr2 <- sdreport(obj2)
+sdr2
+
+p2 <- obj2$env$parList(opt2$par) 
+p2
+```
+
+
+

@@ -1,0 +1,671 @@
+---
+title: "MAR 580 HW3"
+author: "Tara Dolan"
+date: "11/7/2023"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, cache=TRUE)
+```
+
+```{r}
+#Load required packages
+library(TMB)
+library(kableExtra)
+#devtools::install_github("kaskr/TMB_contrib_R/TMBhelper", force=TRUE) # helper function to get AIC
+library(TMBhelper)
+library(tidyverse) 
+library(readxl) 
+library(parallel)
+```
+<br> <br>
+
+**Prompt**  
+The Pella-Tomlinson production model dynamics can be described by the equation:
+$$
+B_{y+1} = B_y + B_y * r * \left(1-\left(\frac{B_y}{K}\right)^{m-1}\right)-u_yB_y
+$$
+where where $B_t$ is the biomass in year $y$, $r$ is the intrinsic growth rate, $K$ is the carrying capacity, and $u_y B_y$ = $C_y$ is the predicted catch for year $y$. $m > 1$ is the shape parameter that determines the location of $B_{MSY}$ .  
+<br>
+  
+We assume that the stock is in an unfished state in the initial (1935) year (i.e. $B_{1935} = K$).
+As for our Schaefer model, we assume the survey index observations are proportional to biomass, with the
+logs of the index being normally distributed with estimated observation error variance. Assume the logs of
+the catches are also normally distributed with a standard deviation of 0.05. The likelihood function is then:
+
+$$
+L(\theta|D)=\prod_{y}\frac{1}{\sqrt{2\pi\sigma}}exp\frac{-[lnI_y-ln(qB_y)]^2}{2\sigma^2}*
+\prod_{y}\frac{1}{0.05\sqrt{2\pi}}exp\frac{-[lnC_y-ln(u_yB_y)]^2}{2(0.05)^2}
+$$
+<br> <br>
+**1. BONUS Derive a maximum likelihood estimate for** $\sigma$, **the observation error standard deviation.**
+<br> <br> 
+Take the find the derivative of the MLE with respect to $\sigma$. Set that equal to 0 and then solve for $\sigma$. I forget how to do calculus. So what I did was look up the estimator for $\sigma$ from the normal distribution and make some substitutions.
+
+$$ 
+\hat{\sigma} = \sqrt{\frac{1}{n}\sum_{n}^{i=1}(X_i - \bar{X})^2)}
+$$
+<br>
+In our model, the expectation for the sample mean $\bar{y}$ is the biomass $B_y$ scaled by catchability $q$. So, maybe we could modify the MLE for the normal distribution accordingly:  
+$$ 
+\hat{\sigma} = \sqrt{\frac{1}{n}\sum_{n}^{i=1}(ln(I_y) - ln(\bar{I})^2)}
+$$
+
+<br>
+I am not sure that this is right, but maybe, instead of the sample mean of the survey index $\bar{I}$, we could input the expectation $qB_y$, like so:  
+$$  
+\hat{\sigma} = \sqrt{\frac{1}{n}\sum_{n}^{i=1}(ln(I_y) - ln(qB_y)^2)}
+$$
+<br> 
+Maybe I just got lucky this time, but Gary checked it and said it's what he got. This is what I will implement in the PT model. 
+<br>
+
+**2. Fit the Pella-Tomlinson model to the survey and catch data for** *Pleuronectes electronica*.. 
+(include the analytical MLE for $q$ (& $\sigma$ too if you complete #1) in your model). Evaluate model fit, interpret results, report parameter estimates, and provide recommendations for fishery management based on the results.  
+<br> 
+```{r}
+############ DATA #################
+ 
+### I've been having a lot of trouble with relative paths lately, so I am going to use the full path. 
+#catch data from 1935-2016
+catch <- read_xlsx("/Users/tdolan/Documents/R-Github/AdvPopModeling/session-04_10-31/flounder_index_data.xlsx","catch") 
+#survey index from 1963-2016
+index <- read_xlsx("/Users/tdolan/Documents/R-Github/AdvPopModeling/session-04_10-31/flounder_index_data.xlsx","survey")
+
+#set year 0 = 1935 the beginning of the catch series,such that the survey starts 28 years after the first catch year. 
+index_years <- index$Year - min(catch$Year)
+
+#Data for input into all models. 
+data <- list(catches = catch$Catch,
+               index = index$Index,
+               index_years = index_years)
+data
+
+####inspect data######
+ggplot()+
+  geom_line(aes(Year,Catch),data=catch, col="blue")+
+  ggtitle("Fig. 2.1: catch of Pleuronectes electronica")+
+  theme_classic()
+  
+index %>%
+  mutate(sd=Index*CV)%>%
+ggplot()+
+  geom_line(aes(Year,Index), col="red")+
+  geom_ribbon(aes(Year, ymin=(Index-sd), ymax=(Index+sd)), 
+              fill="red", alpha=0.2)+
+  ggtitle("Fig. 2.2: survey biomass of Pleuronectes electronica")+
+  theme_classic()
+```
+<br> <br>
+
+
+**Fit the Pela-Tomlinson Model**  
+We have implemented the analytical estimator for logSigmaI <br>
+```{r}
+
+##Fit the Schaefer model - copied from the biomass dynamics exercise.
+
+
+#a function from Gary to find the initial value of M in logit space if it's 2 normally
+ss<-function(m){
+  ee<-(3*exp(m)/(1+exp(m)))+1 #applying our same modified logit transformation from the cpp side
+  return((ee-2)^2)#assume m=2, return the squared difference
+}
+dd <-optimize(ss,c(-10,10)) #find the likelihood minimum over a range -10,10
+dd$minimum
+
+#providing initial values for params based on param values from the Schaefer model. 
+parameters <- list(logK=9, 
+                      #list of previous tries
+                            #10
+                            #6.432107,
+                            #9
+                   logr=log(0.56), 
+                      #list of previous tries
+                            #0.4, but can't do that because it's negative.
+                            #exp(-0.578463)= 0.5607596? 
+                            #0.56
+                   logit_m=-0.9, 
+                      #list of previous tries
+                            #-0.6931638, #logit transformed value of 2.
+                            #
+                   logSigmaC=log(0.05),  
+                      #list of previous tries
+                            #exp(-2.99) = 0.05005004,
+                            #previously set to 0.05, param value was -2.99, but cant be negative
+                   #logSigmaI=log(0.23), #now estimating analytically. 
+                      #list of previous tries
+                            #previously set to 0.3, param value was -1.217, but can't be negative.
+                            #what if we try exp(-1.217081) = 0.2960932, so set it back to that. 
+                   #logq = -2, 
+                      #list of previous tries
+                   upar = rep(-1.0,length(data$catches))) #previously -1.6 
+                      #list of previous tries
+                      #mean of the upar estimates from the schaefer model = -0.9
+                      #Gary said to try -1.
+                      #try back transforming -0.9 from logit
+
+#check to make sure there are no NAN in params!
+parameters
+
+
+## Make C++ file
+#TMB::template("HW3_biomassdynamics_gavin.cpp")
+
+## Compile and load the model
+dll_name <- "HW3_biomassdynamics_gavin"
+if(is.loaded(dll_name)) {
+  dyn.unload(dynlib(dll_name))
+}
+compile("HW3_biomassdynamics_gavin.cpp")
+dyn.load(dynlib(dll_name))
+
+
+## Make a function object
+obj <- MakeADFun(data, parameters, DLL= dll_name,
+                 #map = list(m=factor(NA), #turning this off so that we are estimating m
+                            map = list(logSigmaC=factor(NA)),
+                 control=list(eval.max=10000,iter.max=10000,rel.tol=1e-15))
+
+## Call function minimizer
+opt <- nlminb(obj$par, obj$fn, obj$gr, control= list(eval.max = 10000,
+                                                       iter.max = 10000))
+
+## Get parameter uncertainties and convergence diagnostics
+sdr <- sdreport(obj)
+sdr
+
+pl <- obj$env$parList(opt$par) 
+
+q <- summary(sdr, type = "report") %>% 
+  as.data.frame() %>% 
+  janitor::clean_names() %>% 
+  rownames_to_column(var="type") %>% 
+  filter(str_detect(type, "logq"))
+
+# Extract time series data and plot. 
+pt_ts <- summary(sdr, type = "report") %>% 
+  as.data.frame() %>% 
+  janitor::clean_names() %>% 
+  rownames_to_column(var="type") %>% 
+  mutate(type=gsub(pattern="_",replacement="",x=type ,fixed=TRUE))%>%
+  filter(str_detect(type, paste(c("biomass","catchpred","upar","indexpred"), collapse = '|'))) %>%
+  separate(type, c("type","yr")) %>% 
+  mutate(yr = as.numeric(ifelse(is.na(yr),0,yr)))%>%
+  mutate(model="pt")
+
+pt_ts%>%
+  filter(type =="indexpred")%>%
+  ggplot(aes(x = yr, y = estimate)) +
+  geom_line() +
+  geom_ribbon(aes(ymin=estimate-std_error, ymax=estimate+std_error), alpha=0.2)+
+  geom_point(data = index, aes(x = Year-1963, y = Index),
+             col = "darkgreen")+
+  ggtitle("Fig 2.3: Survey index: model predictions vs. observations PT model")+
+  xlab("Year")+
+  theme_minimal()
+
+pt_ts%>%
+  filter(type =="upar")%>%
+  ggplot(aes(x = yr, y = estimate)) +
+  geom_line() +
+  geom_ribbon(aes(ymin=estimate-std_error, ymax=estimate+std_error), alpha=0.2)+
+  ggtitle("Fig 2.4: Estimated exploitation rate PT model")+
+  xlab("Year")+
+  theme_minimal()
+
+pt_ts%>%
+  filter(type =="biomass")%>%
+  ggplot(aes(x = yr, y = estimate)) +
+  geom_line() +
+  geom_ribbon(aes(ymin=estimate-std_error, ymax=estimate+std_error), alpha=0.2)+
+  ggtitle("Fig 2.5: Estimated biomass PT model")+
+  xlab("Year")+
+  theme_classic()
+
+######### Extract and plot the model residuals for survey index ############
+pt_resids <-pt_ts%>%
+  filter(type =="indexpred")%>% mutate(Year=yr+1963)%>%full_join(index)%>%
+  mutate(resids=Index-estimate)
+
+pt_resids%>%
+  ggplot(aes(x=yr,y=resids))+
+  geom_point()+
+  geom_smooth(method="lm")+
+  ggtitle("Fig 2.6: Residuals on predicted survey index PT model")+
+  theme_classic()
+
+
+```
+<br>  
+  
+**Recommendations for fisheries management:** Exploitation rate has remained steady over the past decade, with a slight uptick in recent years. Biomass has remained steady over the past decade with a slight downturn in recent years. Given that m is the shape parameter which determines the location of reference point $B_{MSY}$ We need to compare this to estimated biomass, which will give us catch advice. We probably covered this in lecture, but I am not sure how to convert m into $B_{MSY}$, since they are not in the same units. If m is $F_{MSY}$ = 1.4, then I would say we should reduce fishing pressure because F > 1.4 for the past decade.  
+<br> <br>
+
+
+  
+**3a. Compare the results of the P-T model to those of the schaefer model**  
+<br> 
+The Schaefer model is a variant of the Pella-Tomlinson model where m=2. We will fit it as an exact copy of the biomass dynamics homework. <br>
+
+**Fit The Schaefer model** <br>
+```{r}
+##Fit the Schaefer model - copied from the biomass dynamics exercise.
+
+parameters_schaefer <- list(logK=10, 
+                   logr=log(0.4), 
+                   m=2, 
+                   logSigmaC=log(0.05), 
+                   logSigmaI=log(0.2),
+                   #logq = -2, 
+                   upar = rep(-1.6,length(data$catches)))
+parameters_schaefer
+
+
+## Make C++ file
+#TMB::template("biomassdynamics.cpp")
+
+## Compile and load the model
+dll_name <- "biomassdynamics_gavin" # the "_gavin" means it's untouched from the biomass dynamics exercise
+if(is.loaded(dll_name)) {
+  dyn.unload(dynlib(dll_name))
+}
+compile("biomassdynamics_gavin.cpp")
+dyn.load(dynlib(dll_name))
+
+
+## Make a function object
+obj_schaefer <- MakeADFun(data, parameters_schaefer, DLL= dll_name,
+                 map = list(m=factor(NA),logSigmaC=factor(NA)),
+                 control=list(eval.max=10000,iter.max=10000,rel.tol=1e-15))
+
+## Call function minimizer
+opt_schaefer <- nlminb(obj_schaefer$par, obj_schaefer$fn, obj_schaefer$gr, control= list(eval.max = 10000,
+                                                       iter.max = 10000))
+
+## Get parameter uncertainties and convergence diagnostics
+sdr_schaefer <- sdreport(obj_schaefer)
+sdr_schaefer
+
+pl_schaefer <- obj_schaefer$env$parList(opt_schaefer$par) 
+
+q_schaefer <- summary(sdr_schaefer, type = "report") %>% 
+  as.data.frame() %>% 
+  janitor::clean_names() %>% 
+  rownames_to_column(var="type") %>% 
+  filter(str_detect(type, "logq"))
+
+summary(sdr_schaefer, type = "report") %>% 
+  as.data.frame() %>% 
+  janitor::clean_names() %>% 
+  rownames_to_column(var="type") %>% 
+  filter(str_detect(type, "biomass")) %>% 
+  separate(type, c("type","yr")) %>% 
+  mutate(yr = as.numeric(ifelse(is.na(yr),0,yr))) %>% 
+  ggplot() +
+  aes(x = yr, y = estimate) +
+  geom_line() +
+  geom_point(data = index, aes(x = Year-1935, y = Index/exp(q[1,2])),
+             col = "darkgreen")+
+ggtitle("Fig. 3.1: Schaefer model observed vs estimated biomass")+
+  theme_classic()
+```
+<br> <br>
+
+
+
+**Combine and report fit stats from both the Schaefer and PT model** <br>
+```{r}
+
+clean_schaefer <- summary(sdr_schaefer, type = "report") %>% 
+  as.data.frame() %>% 
+  janitor::clean_names() %>% 
+  rownames_to_column(var="type")%>%
+  filter(type %in% c("logK","logr","upar","logq","logSigmaI","logSigmaC","biomass","m","catch_pred","index_pred"))
+names(clean_schaefer)<-c("parameter","estimate_schaefer", "std_error_schaefer")
+
+clean_pt <- summary(sdr, type = "report") %>% 
+  as.data.frame() %>% 
+  janitor::clean_names() %>% 
+  rownames_to_column(var="type")%>%
+  filter(type %in% c("logK","logr","logit_m","upar","logq","logSigI","biomass","m","catch_pred","index_pred"))
+names(clean_pt)<-c("parameter","estimate_PT", "std_error_PT")
+
+comp_tab <-full_join(clean_pt,clean_schaefer)%>%
+  mutate_at(vars(-parameter), funs(round(., 3)))
+comp_tab%>%
+  kbl(caption = "Comparison of parameter estimates Pela-Tomlinson and Schaefer models") %>%
+  kable_styling()
+
+#######Extract the model time series############
+pt_ts <- summary(sdr, type = "report") %>% 
+  as.data.frame() %>% 
+  janitor::clean_names() %>% 
+  rownames_to_column(var="type") %>% 
+  mutate(type=gsub(pattern="_",replacement="",x=type ,fixed=TRUE))%>%
+  filter(str_detect(type, paste(c("biomass","catchpred","upar","indexpred"), collapse = '|'))) %>%
+  separate(type, c("type","yr")) %>% 
+  mutate(yr = as.numeric(ifelse(is.na(yr),0,yr)))%>%
+  mutate(model="pt")
+
+schaefer_ts <- summary(sdr_schaefer, type = "report") %>% 
+  as.data.frame() %>% 
+  janitor::clean_names() %>% 
+  rownames_to_column(var="type") %>% 
+  mutate(type=gsub(pattern="_",replacement="",x=type ,fixed=TRUE))%>%
+  filter(str_detect(type, paste(c("biomass","catchpred","upar","indexpred"), collapse = '|'))) %>%
+  separate(type, c("type","yr")) %>% 
+  mutate(yr = as.numeric(ifelse(is.na(yr),0,yr)))%>%
+  mutate(model="schaefer")
+
+model_ts <-bind_rows(pt_ts,schaefer_ts)
+
+############ Plot the model time series ###############
+model_ts%>%
+  filter(type =="indexpred")%>%
+  ggplot(aes(x = yr, y = estimate, color=model)) +
+  geom_line() +
+  geom_ribbon(aes(ymin=estimate-std_error, ymax=estimate+std_error, fill=model), alpha=0.2)+
+  geom_point(data = index, aes(x = Year-1963, y = Index),
+             col = "darkgreen")+
+  ggtitle("Fig 3.2: Survey index: model predictions vs. observations by model")+
+  xlab("Year")+
+  theme_minimal()
+
+model_ts%>%
+  filter(type =="upar")%>%
+  ggplot(aes(x = yr, y = estimate, color=model)) +
+  geom_line() +
+  geom_ribbon(aes(ymin=estimate-std_error, ymax=estimate+std_error, fill=model), alpha=0.2)+
+  ggtitle("Fig 3.3: Estimated exploitation rate by model")+
+  xlab("Year")+
+  theme_minimal()
+
+model_ts%>%
+  filter(type =="biomass")%>%
+  ggplot(aes(x = yr, y = estimate, color=model)) +
+  geom_line() +
+  geom_ribbon(aes(ymin=estimate-std_error, ymax=estimate+std_error, fill=model), alpha=0.2)+
+  ggtitle("Fig 3.4: Estimated biomass by model")+
+  xlab("Year")+
+  theme_classic()
+
+######### Extract and plot the model residuals for survey index ############
+index_resids <-model_ts%>%
+  filter(type =="indexpred")%>% mutate(Year=yr+1963)%>%full_join(index)%>%
+  mutate(resids=Index-estimate)
+
+index_resids%>%
+  ggplot(aes(x=yr,y=resids,color=model))+
+  geom_point()+
+  geom_smooth(method="lm")+
+  ggtitle("Fig 3.5: Residuals on predicted survey index by model")+
+  theme_classic()
+
+```
+<br>
+Parameter values are relatively similar between the two models Schaefer (S) and Pella-Tomlinson (PT). The primary difference between the models is that M is set at 2 for the S model, whereas it is estimated within the model for the PT model. Estimated m=1.431 (std.err.= 0.204) in the PT model. Another difference is that SigmaI, the standard deviation of the estimated survey index was calculated analytically in the PT model. LogSigmaI = 0.283 in the PT model and -1.217 in the S model. [It looks like I forgot to back transform the latter.] When we convert the latter back to log scale, exp(-1.217)=0.296, the parameter values are similar for the two models, at least the S model is within 2 standard deviations of the logSigmaI value of the PT model. 
+<br>  
+The survey index predictions (Figure 3.2) from both models are relatively similar. The PT gives higher predictions than the S model in some cases, but lower in others. Looking at the survey index residuals (Figure 3.5), there doesn't seem to be a strong pattern of over or underprediction by either model. The PT model predicts a higher exploitation rate compared to the S model (Figure 3.3). The PT model predicts a lower estimated biomass than the S model (Figure 3.4), particularly toward the end of the time series.  
+<br>
+  
+**3b. Determine a best model if there is one**  
+<br> 
+```{r}
+data.frame(model=c("Schaefer","Pella-Tomlinson"),AIC=c(TMBAIC(opt_schaefer),TMBAIC(opt)))%>%
+  kbl(caption="Model comparison by AIC")%>%
+  kable_styling()
+
+```
+  <br>
+The Pella-Tomlinson model fits the data better, as measured by AIC. 
+  
+<br>  
+**3c. Comment on how multiple models could be considered in management advice**  
+Multiple models could be considered to evaluate different scenarios when certain assumptions are poorly bounded. For example, if the natural mortality regime is unknown, different model runs could compare model predictions under different natural mortality assumptions. Another way to combine advice from multiple models is via ensemble modeling or multi-model inference. In these cases, weighted combinations (often averages) are taken from model predictions. 
+  
+<br> <br>  
+  
+**4. BONUS Provide rationale for possible changes to the model and fit an alternative model based on these conclusions** 
+<br>
+I will come back to this one if I have time. 
+<br><br>  
+  
+**5a. Use the fitted PT model to generate 500 new data sets based on the best estimates**  
+<br>
+```{r, results='hide', message=FALSE}
+#the parameters from the PT model
+parameters <- list(logK=9, 
+                   logr=log(0.56), 
+                   logit_m=-0.9, 
+                   logSigmaC=log(0.05),   
+                   upar = rep(-1.0,length(data$catches)))
+
+# the model code will stay the same, so you don't need to compile it again. 
+## Compile and load the model
+dll_name <- "Simulate_HW3"
+if(is.loaded(dll_name)) {
+  dyn.unload(dynlib(dll_name))
+}
+compile("Simulate_HW3.cpp")
+
+dyn.load(dynlib(dll_name))
+
+## Make a function object
+obj_sim <- MakeADFun(data, parameters, DLL= dll_name,
+                 #map = list(m=factor(NA), #turning this off so that we are estimating m
+                            map = list(logSigmaC=factor(NA)),
+                 control=list(eval.max=10000,iter.max=10000,rel.tol=1e-15))
+
+#MUST CALL MINIMIZER FIRST
+### Call function minimizer
+fit <- nlminb(obj_sim$par, obj_sim$fn, obj_sim$gr, control= list(eval.max = 10000,iter.max = 10000))
+
+sim_data <- map(1:10,function(x)obj_sim$simulate(complete=TRUE))
+str(sim_data, max.level = 1)
+
+##IT WORKED###
+
+```
+
+<br><br>
+**5b. Fit both the PT and the Schaefer models to each of these data sets.**  
+<br>  
+```{r, results='hide', message=FALSE}
+#First pre-compile the PT and Schaefer scripts (in case they were not already compiled from previous chunk)
+
+### Schaefer
+## Compile and load the model
+dll_name_S <- "biomassdynamics_gavin" # the "_gavin" means it's untouched from the biomass dynamics exercise
+if(is.loaded(dll_name_S)) {
+  dyn.unload(dynlib(dll_name_S))
+}
+compile("biomassdynamics_gavin.cpp")
+dyn.load(dynlib(dll_name_S))
+
+### PT
+## Compile and load the model
+dll_name_PT <- "HW3_biomassdynamics_gavin"
+if(is.loaded(dll_name_PT)) {
+  dyn.unload(dynlib(dll_name_PT))
+}
+compile("HW3_biomassdynamics_gavin.cpp")
+dyn.load(dynlib(dll_name_PT))
+
+
+################# PELLA TOMLINSON ########################################
+fit_pt <-function(dataset){
+  
+data <- list(catches = dataset$catches,index = dataset$index,index_years = dataset$index_years)
+parameters <- list(logK=9, logr=log(0.56), logit_m=-0.9,logSigmaC=log(0.05),upar = rep(-1.0,length(data$catches)))
+  
+dyn.load(dynlib(dll_name_PT))
+obj <- MakeADFun(data, parameters, DLL= dll_name_PT,
+                 #map = list(m=factor(NA), #turning this off so that we are estimating m
+                            map = list(logSigmaC=factor(NA)),
+                 control=list(eval.max=10000,iter.max=10000,rel.tol=1e-15))
+## Call function minimizer
+opt <- nlminb(obj$par, obj$fn, obj$gr, control= list(eval.max = 10000,
+                                                       iter.max = 10000))
+## Get parameter uncertainties and convergence diagnostics
+#sdr <- sdreport(obj)
+#pl <- obj$env$parList(opt$par) 
+
+clean_pt <- summary(sdreport(obj), type = "report") %>% 
+  as.data.frame() %>% 
+  janitor::clean_names() %>% 
+  rownames_to_column(var="type")%>%
+  filter(type %in% c("logK","logr","upar","logq",
+                     "biomass.82", #terminal year biomass
+                     "upar.81", #terminal year exploitation rate 
+                     #seems wrong that the index is 81, not 82...fix later if time.
+                     "logSigmaI","logSigmaC","biomass","m","catch_pred","index_pred"))
+clean_pt[nrow(clean_pt)+1,]<-c("AIC",TMBAIC(opt),NA)
+clean_pt
+}
+
+#############SCHAEFER#################################################
+fit_schaefer <-function(dataset){
+  
+data <- list(catches = dataset$catches, index = dataset$index, index_years = dataset$index_years)
+parameters_schaefer <- list(logK=10, logr=log(0.4), m=2, logSigmaC=log(0.05),logSigmaI=log(0.2),
+                            upar = rep(-1.6,length(data$catches)))
+
+dyn.load(dynlib(dll_name_S))  
+  ## Make a function object
+obj_schaefer <- MakeADFun(data, parameters_schaefer, DLL= dll_name_S,
+                 map = list(m=factor(NA),logSigmaC=factor(NA)),
+                 control=list(eval.max=10000,iter.max=10000,rel.tol=1e-15))
+## Call function minimizer
+opt_schaefer <- nlminb(obj_schaefer$par, obj_schaefer$fn, obj_schaefer$gr, control= list(eval.max = 10000,iter.max = 10000))
+
+## Get parameter uncertainties and convergence diagnostics
+#sdr_schaefer <- sdreport(obj_schaefer)
+#pl_schaefer <- obj_schaefer$env$parList(opt_schaefer$par) 
+
+clean_schaefer <- summary(sdreport(obj_schaefer), type = "report") %>% 
+  as.data.frame() %>% 
+  janitor::clean_names() %>% 
+  rownames_to_column(var="type")%>%
+  filter(type %in% c("logK","logr","upar","logq",
+                     "biomass.82", #terminal year biomass
+                     "upar.81", #terminal year exploitation rate 
+                     #seems wrong that the index is 81, not 82...fix later if time.
+                     "logSigmaI","logSigmaC","biomass","m","catch_pred","index_pred"))
+
+clean_schaefer[nrow(clean_schaefer)+1,]<-c("AIC",TMBAIC(opt_schaefer),NA)
+clean_schaefer
+
+
+}
+
+####################### APPLY PT MODEL TO LIST OF DATA 
+
+## Apply to the list
+numCores = detectCores()
+PT_out <-mclapply(simdat, fit_pt,mc.cores=numCores)
+
+##bind the outputs into a DataFrame
+ptoutdf <-PT_out %>% map(~as_tibble(.)) %>% bind_rows(.id="index")%>%as.data.frame()%>%
+  mutate(model="PT")
+
+####################### APPLY SCHAEFER MODEL TO LIST OF DATA 
+
+## Apply to the list
+Schaf_out <-mclapply(simdat, fit_schaefer,mc.cores=numCores)
+
+##########bind the outputs into a DataFrame
+Schafoutdf <-Schaf_out %>% map(~as_tibble(.)) %>% bind_rows(.id="index")%>%as.data.frame()%>%
+  mutate(model="S")
+
+########### COMBINE THE MODEL OUTPUTS ##############
+model_outputs <-bind_rows(Schafoutdf,ptoutdf)
+
+```
+
+<br><br>  
+**5c. Summarize the distributions of relative errors for r, K, and the terminal year biomass and exploitation rates**  <br> 
+I am not sure what is meant by relative error in this case. The standard error estimates are on different scales. One way to go about makeing them comparable would be to divide the standard error by the estimate. If the standard error is the standard deviation of the estimate, and the estimate is the mean, then this would be equivalent to a coefficient of variation. 
+```{r}
+model_outputs <-model_outputs %>%mutate(across(c("estimate","std_error"), as.numeric))%>%
+  mutate(CV=std_error/estimate)
+
+#std_error
+model_outputs%>%
+  filter(type %in% c("logK","logr","biomass.82","upar.81"))%>%
+  ggplot(aes(x=model,y=std_error))+
+  #ggplot(aes(x=type,y=std_error,fill=model))+
+  #geom_boxplot(position=position_dodge(1))+
+  geom_boxplot()+
+  #coord_flip()+
+  facet_grid(~type, scales="free")+
+  theme_classic()
+
+#std_error
+model_outputs%>%
+  filter(type %in% c("logK","logr","biomass.82","upar.81"))%>%
+  ggplot(aes(x=type,y=std_error,fill=model))+
+  geom_boxplot(position=position_dodge(1))+
+  geom_boxplot()+
+  coord_flip()+
+  ggtitle("Relative standard error")+xlab("standard error")+
+  theme_classic()
+ 
+#CV
+model_outputs%>%
+  filter(type %in% c("logK","logr","biomass.82","upar.81"))%>%
+  ggplot(aes(x=type,y=CV,fill=model))+
+  geom_boxplot(position=position_dodge(1))+
+  geom_boxplot()+
+  coord_flip()+
+  ggtitle("Coefficient of variation")+xlab("CV")+
+  theme_classic() 
+
+#CV
+model_outputs%>%
+  filter(type %in% c("logK","logr","biomass.82","upar.81"))%>%
+  ggplot(aes(x=type,y=CV,fill=model))+
+  geom_boxplot(position=position_dodge(1))+
+  geom_boxplot()+
+  coord_flip()+
+  ggtitle("Estimate")+xlab("estimated value")+
+  theme_classic() 
+
+```
+  
+<br>
+It is an error that I don't have any distribution around these estimates and errors. I went back and looked at this, and it turns out my model is simulating the same data every time.
+
+
+<br>  
+**5d.Compute the frequency for which the PT model is selected by AIC as the "best" model.**  
+<br>  
+```{r}
+compAIC <- filter(model_outputs, type=="AIC")%>%
+  pivot_wider(names_from = model,values_from = estimate)%>%
+  mutate(h0_pt = ifelse(abs(PT > S),TRUE,FALSE))
+
+nrow(filter(compAIC,h0_pt==TRUE))/length(compAIC$h0_pt)
+
+```
+  
+<br>
+It will be 100% of the time because there is no variation between the simulations.
+
+<br>  
+**5e. Compare the results of performance testing to the conclusions about the model made in question 3.**  
+
+
+<br>  
+  
+  
+<br><br>
+**6. BONUS BONUS: For the initial PT model, compute a likelihood profile for the shape parameter** *m* **and show the associated uncertainty in the estimate for this parameter using 95% CI.   
+<br>  
+Unfortunately there is not enough time to do this one. What I would do is to fit the PT model over a range of values of m and extract the likelihood for each one, then plot it.
+
+  
+  
+
+

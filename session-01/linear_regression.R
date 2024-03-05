@@ -22,20 +22,20 @@ lm1 <- lm(y~x, data = data)
 lm1
 
 # model parameters
-parameters <- list(b0=0, b1=0, logSigma=0)
+parameters <- list(b0=0, b1=0, logSigma=0)#set starting values for param
 print(parameters)
 
 #compile the TMB model
 #require(TMB)
-compile("session-01/linear_regression.cpp")
+compile("session-01/linear_regression.cpp")#
 
 # load the compiled model object
 dyn.load(dynlib("session-01/linear_regression"))
 
 ################################################################################
 # make the TMB model
-model <- MakeADFun(data = data, 
-                   parameters = parameters,
+model <- MakeADFun(data = data, #list
+                   parameters = parameters, #list
                    #map = list(b0=factor(NA)),
                    DLL="linear_regression")
 #control=list(eval.max=10000,iter.max=1000,rel.tol=1e-15),silent=T)
@@ -44,14 +44,19 @@ model <- MakeADFun(data = data,
 print(attributes(model))
 
 # fit the model using nlminb
-fit <- nlminb(model$par, model$fn, model$gr) #estimator nlminb - TMB has created the gradient
-fit # at the minimum the gradient should be ~0
-#$par is the params, 
-#$objective function value
+# the cpp file has gotten us param values and the gradient, but we still have to fit it. 
+fit <- nlminb(model$par, #starting param values
+              model$fn, #function value
+              model$gr) # gradient
+#estimator nlminb - TMB has created the gradient
+fit # the list will start out large and converge towards 0. 
+#$par is the param point estimates
+#$objective function value at best fit. nll
 #$converge yest or no
 #These outputs are explained in the help file for nlminb
 
-# get variance estimates for model parameters
+# get uncertainty estimates for model parameters
+# uses the delta method to calculate the standard errors about each estimate. 
 rep <- sdreport(model) #asymptotic variances for parameters
 rep #intercept slope and estimated variance in the log scale. 
 

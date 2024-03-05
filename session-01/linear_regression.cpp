@@ -14,19 +14,27 @@ Type objective_function<Type>::operator() () //objective function
   PARAMETER(b0);    //model parameter to be estimated, real number
   PARAMETER(b1);    //model parameter to be estimated, real number
   PARAMETER(logSigma);    //model parameter to be estimated, real number
+  //sigma is on the log scale to force it to be positive. 
   
-  vector<Type> ypred(n);   //object that will contain our model predictions
+  vector<Type> ypred(n);   //define object to store our model predictions
   // note this is a function of model parameters, 
   // therefore needs to be differntiable
   // we also specify the size of the vector
   
-  Type neglogL = 0.0;    //objective function value. Initialize to 0.
-  
+  Type neglogL = 0.0;    //Initialize the objective function to 0.
   // specify the model & objective function
   
   ypred = b0 + b1*x;    // model predictions
   
-  neglogL = -sum(dnorm(y, ypred, exp(logSigma), true));  //objective function value
+  //negative log likelihood. aka the objective function
+  //dnorm(observations, mean, standard deviation, true=force to log likelihood)
+  //recall, we are summing the log likelihood over all predictions. so over all preds,
+  //the probability density (continuous dist) for each value y, where it's coming
+  //from a normal distribution with a mean of yhat pred and a standard deviation of sigma
+  //
+  neglogL = -sum(dnorm(y, ypred, exp(logSigma), true));  
+   
+   //derived quantities
    SIMULATE {
      y = rnorm(ypred,exp(logSigma));
      REPORT(y); //get results back into R
