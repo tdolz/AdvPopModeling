@@ -1,0 +1,191 @@
+---
+title: "age structured model"
+author: "Tara Dolan"
+date: "11/15/2023"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+**Age structured model in class exercise**
+
+**Predicted Catch**  
+$$
+C_t = \sum W_a N_a \frac{F_a}{F_{a,t+M}}(1-e^{F_{a,t}+M})
+
+$$
+
+
+Catch at time t $C_t$ is the sum of weight at age $W_a$ * numbers at age $N_a$ * the fraction of mortality at age that is fishing mortality at age $F_a$, relative to fishing mortality at all ages and natural mortality $F_{a,t+M}$, which is assumed to be the same at all ages and time steps here. This is then multiplied by the exponential function of mortality $1-e^{F_{a,t}+M}$ (?). <br>
+
+**Predicted biomass**  
+The biomass is the sum of numbers at age*weights at age.
+$$
+B_t =\sum_{a}W_a N_a
+$$
+<br>
+
+**Recruitment function**  
+Parameters needed are:  
+Recruitment at time zero $R_0$  
+h  
+Stock size (aka SSB) $S_t$  
+$$
+R_t = \alpha S_{t-k}e^{-\beta S_{t-k}}e^{\epsilon_t}
+$$
+<br>  
+
+**Stock Size**  
+Stock size $S_t$ is the sum over all age classes of numbers at age, weights at age, and selectivity at age. Weights and selectivity do not change over time, but numbers do.  
+$$ 
+S_t = \sum_{a}N_{a,t}W_a\theta_a
+$$
+<br>  
+
+**Age structure process**  
+<br>
+Number of fish at age 1, time step 1 = recruitment at time step 1. Recruitment happens at age 1. 
+$$  
+N_{1,t+1} = R_{t+1} 
+$$
+<br>
+Number of fish from ages 2-9 (Age 10 is the plus group) are the number of fish from the previous year, deprecated by fishing mortality, which is moderate by selectivity at age, and natural mortality.  
+$$
+N_{a+1,t+1} =N_{a,t}e^{-(F_tS_{a-1}+M)}
+
+$$
+<br>  
+Number of fish in the plus group is the number of fish in penultimate group + number of fish in this group.  
+$$
+N_{A,t+1} =N_{A-1,t}e^{-(F_tS_{a-1}+M)}+N_{A,t}e^{-(F_tS_{a}+M)}
+
+$$
+
+**General approach** - from Gavin's email:  
+<br>
+1. A set of state variables, that we are interested in the values for (e.g. numbers in the population, population biomass, or numbers at age). State variables here are Numbers at age $N_{a,t}$, stock size $S_t$, fishing mortality $F_t$, and recruitment $R_t$.
+<br>
+2. A model for the population process(es) that describes how the state variables change over time (the population dynamics model). The age structured model is the process model. 
+<br>
+3. The process model has parameters, that we might be interested in estimating the values for, so we can get the best estimates for the time series of our population / state variables.  The process model parameters are recruitment, natural mortality and fishing mortality at age. We will probably also have to analytically estimate q. 
+<br>
+4. Data from the system that we fit the model to. We have data on catch and a survey index. 
+<br>
+5. Additional information that might be needed in our model (e.g. covariates). We don't have covariates but we do have matrices for selectivity at age and weight at age.  
+<br>  
+6. An observation model that describes the relationship between the state variables and the data in (4). Observation models typically include an equation for the expected value for the data given values for the state variables, and their assumed probability distribution (our likelihood).  Our observation model is a survey model and catch model.  
+
+Our recipes for implementing the models then all have the following:  
+declaration of the data that we want to fit to  
+inclusion of any additional information needed for the process/observation model (e.g. regression covariates)  
+declaration of the parameters (the things that TMB will change the values for to get our best estimates), including initial values for the parameters that the minimizer will start from  
+declaration of additional objects that we need to conduct the calculations  
+transformation of estimated parameters to ensure the range of parameters for our process/observation model matches the their definition in the process/observation models  
+calculation of the state variables in the first time step  
+some kind of loop over time that applies the process model over the full range of time steps that either:  
+(1) calculates the time series of state variables  
+(2) calculates the expectation for the time series of state variables and compares this to the estimated values (ie includes process error) [state-space models]  
+calculation of expected values for the observations  
+comparison of the expected values to the observations (likelihood function)  
+calculation of any additional contributions to the likelihood (e.g. penalties/priors, and other random effects)
+report the values for state variables and other derived quantities  
+
+**load the data and parameters**  
+```{r}
+## Load TMB TRUE
+library(TMB)
+library(tidyverse)
+library(readxl)
+
+setwd("/Users/tdolan/Documents/R-Github/AdvPopModeling")
+## Data and parameters
+
+#catch data from 1935-2016
+catch <- read_xlsx("session-04_10-31/flounder_index_data.xlsx","catch") 
+#survey index from 1963-2016
+index <- read_xlsx("session-04_10-31/flounder_index_data.xlsx","survey")
+#set year 0 = 1935 the beginning of the catch series, 
+#such that the survey starts 28 years after the first catch year. . 
+index_years <- index$Year - min(catch$Year)
+
+##read in the biodata 
+# maturity
+maturity <- c(0.1,0.5,0.9,1,1,1,1,1,1,1)
+# selectivity
+selectivity <- c(0.1,0.75,0.9,1,1,1,1,1,1,1)
+# mean weight
+WAA <-c(0.040,0.160,0.331,0.511,0.675,0.812,0.922,1.006,1.070,1.117)
+# implementing scalar for natural mortality
+M=0.4
+
+
+
+#data
+data <- list(catches = catch$Catch,
+               index = index$Index,
+               index_years = index_years,
+               selectivity=selectivity, 
+               WAA=WAA, 
+               M=M,
+               maturity=maturity)
+data
+
+#parameters
+parameters <- list(R0=10, 
+                   h=log(0.4), #not sure where this came from. I forgot. 
+                   #m=0.4, 
+                   logSigmaC=log(0.05), 
+                   logSigmaI=log(0.2),
+                   Fpar = rep(-1.6,length(data$catches)))
+parameters
+
+```
+<br>  
+
+**Compile the code**
+```{r}
+## Make C++ file
+#TMB::template("age_structure.cpp")
+
+## Compile and load the model
+dll_name <- "age_structure" # 
+if(is.loaded(dll_name)) {
+  dyn.unload(dynlib(dll_name))
+}
+compile("age_structure.cpp")
+dyn.load(dynlib(dll_name))
+
+
+## Make a function object
+obj <- MakeADFun(data, parameters, DLL= dll_name,
+                 map = list(
+                # m=factor(NA),
+                 logSigmaC=factor(NA)),
+                 control=list(eval.max=10000,iter.max=10000,rel.tol=1e-15))
+
+## Call function minimizer
+opt <- nlminb(obj$par, obj$fn, obj$gr, control= list(eval.max = 10000,
+                                                       iter.max = 10000))
+
+## Get parameter uncertainties and convergence diagnostics
+sdr <- sdreport(obj)
+sdr
+
+pl <- obj$env$parList(opt$par) 
+
+
+```
+<br>  
+
+**Fit the model and extract summary objects**  
+```{r}
+
+
+```
+
+
+
+
+
