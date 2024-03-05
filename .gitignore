@@ -3,3 +3,5 @@
 .RData
 .Ruserdata
 SS-DL-tool-master*
+.o
+.so
